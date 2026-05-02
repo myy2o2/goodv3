@@ -1,0 +1,22 @@
+{
+  "pretrain_ckpt": "./outputs/stage1/cora/degree/concept/20260502-015855/pretrain_model.pt",
+  "dataset": "cora",
+  "domain": "degree",
+  "shift": "concept",
+  "ssl_tasks": "consistency,contrastive,homottt",
+  "num_ssl": 3,
+  "task_cfg_json": "{}",
+  "gate_hidden_dim": 64,
+  "gate_num_layers": 2,
+  "gate_dropout": 0.1,
+  "gate_temperature": 1.0,
+  "lr": 0.001,
+  "weight_decay": 0.00001,
+  "epochs": 100,
+  "patience": 20,
+  "seed": 0,
+  "device": "cuda",
+  "output_root": "./outputs",
+  "timestamp": "",
+  "run_name": "gate_ssl"
+}

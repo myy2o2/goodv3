@@ -1,0 +1,19 @@
+{
+  "pretrain_ckpt": "./outputs/stage1/pubmed/word/covariate/20260502-020729/pretrain_model.pt",
+  "dataset": "pubmed",
+  "domain": "word",
+  "shift": "covariate",
+  "ssl_lr": 0.001,
+  "encoder_lr": 0.0005,
+  "weight_decay": 0.00001,
+  "finetune_epochs": 100,
+  "replace_last_k_layers": 1,
+  "seed": 0,
+  "device": "cuda",
+  "use_optuna": true,
+  "optuna_trials": 100,
+  "optuna_timeout": 0,
+  "output_root": "./outputs",
+  "timestamp": "",
+  "run_name": "ttt"
+}
