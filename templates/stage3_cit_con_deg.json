@@ -6,7 +6,7 @@
   "ssl_lr": 0.001,
   "encoder_lr": 0.0005,
   "weight_decay": 0.00001,
-  "finetune_epochs": 50,
+  "finetune_epochs": 100,
   "replace_last_k_layers": 1,
   "seed": 0,
   "device": "cuda",

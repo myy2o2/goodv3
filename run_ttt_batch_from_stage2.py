@@ -33,6 +33,12 @@ def parse_args():
         help="Path to stage3 script",
     )
     parser.add_argument(
+        "--stage-name",
+        type=str,
+        default="",
+        help="Optional output stage folder name; defaults to one inferred from --ttt-script",
+    )
+    parser.add_argument(
         "--gate-file-name",
         type=str,
         default="gate_model.pt",
@@ -84,6 +90,18 @@ def make_timestamp(idx: int, gate_path: Path) -> str:
     return "batch{:03d}_{}_{}".format(idx, parent_tag, now)
 
 
+def infer_stage_name(ttt_script_path: Path) -> str:
+    name = ttt_script_path.stem.lower()
+    stage_map = {
+        "ttt": "stage3",
+        "ttthard": "stage3_hard",
+        "ttt_unshared": "stage3_unshared",
+        "ttt_one": "stage3_one",
+        "ttt_avg": "stage3_avg",
+    }
+    return stage_map.get(name, "stage3")
+
+
 def read_ood_test_acc(metrics_path: Path) -> Optional[float]:
     if not metrics_path.exists():
         return None
@@ -108,6 +126,8 @@ def main():
     ttt_script_path = Path(args.ttt_script)
     if not ttt_script_path.exists():
         raise FileNotFoundError("Missing --ttt-script: {}".format(ttt_script_path))
+
+    stage_name = str(args.stage_name).strip() or infer_stage_name(ttt_script_path)
 
     stage3_params = load_json(stage3_params_path)
     output_root = str(stage3_params.get("output_root", "./outputs"))
@@ -155,7 +175,7 @@ def main():
         ]
         ret = subprocess.run(cmd)
 
-        run_out_dir = Path(output_root) / "stage3" / dataset / domain / shift / ts
+        run_out_dir = Path(output_root) / stage_name / dataset / domain / shift / ts
         metrics_path = run_out_dir / "metrics.json"
         ood_test_acc = read_ood_test_acc(metrics_path)
 
@@ -196,6 +216,7 @@ def main():
     summary = {
         "stage2_dir": str(stage2_dir),
         "stage3_params": str(stage3_params_path),
+        "stage_name": stage_name,
         "total_found": int(total_found),
         "total_ran": int(len(gate_ckpts)),
         "success_with_metrics": int(success),

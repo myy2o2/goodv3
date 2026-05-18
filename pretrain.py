@@ -326,7 +326,7 @@ def main():
                 **searched,
             }
             model_trial, metrics = train_once(args, data, masks, trial_params, trial=trial)
-            score =  (metrics["id_test_acc"]+2*metrics["ood_test_acc"]) / 3.0
+            score =  (metrics["id_test_acc"]) / 1.0
             if np.isnan(score):
                 score = -1.0
 

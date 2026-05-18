@@ -1,5 +1,5 @@
 {
-  "pretrain_ckpt": "./outputs/stage1/cora/word/covariate/20260502-015804/pretrain_model.pt",
+  "pretrain_ckpt": "./outputs/stage1/cora/word/covariate/right/pretrain_model.pt",
   "dataset": "cora",
   "domain": "word",
   "shift": "covariate",
@@ -11,7 +11,7 @@
   "seed": 0,
   "device": "cuda",
   "use_optuna": true,
-  "optuna_trials": 100,
+  "optuna_trials": 50,
   "optuna_timeout": 0,
   "output_root": "./outputs",
   "timestamp": "",

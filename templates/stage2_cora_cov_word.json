@@ -1,5 +1,5 @@
 {
-  "pretrain_ckpt": "./outputs/stage1/cora/word/covariate/2026cccc02-015804/pretrain_model.pt",
+  "pretrain_ckpt": "./outputs/stage1/cora/word/covariate/right/pretrain_model.pt",
   "dataset": "cora",
   "domain": "word",
   "shift": "covariate",
@@ -9,7 +9,7 @@
   "gate_hidden_dim": 64,
   "gate_num_layers": 2,
   "gate_dropout": 0.1,
-  "gate_temperature": 1.0,
+  "gate_temperature": 5.0,
   "lr": 0.001,
   "weight_decay": 0.00001,
   "epochs": 100,

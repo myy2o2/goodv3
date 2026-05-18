@@ -72,8 +72,8 @@ def extract_masks(data) -> Dict[str, torch.Tensor]:
         raise ValueError("Dataset does not contain train_mask")
 
     masks["train"] = train_mask
-    masks["id_val"] = _get_mask("id_val_mask", "val_mask")
-    masks["id_test"] = _get_mask("id_test_mask", "test_mask")
+    masks["id_val"] = _get_mask("id_val_mask")
+    masks["id_test"] = _get_mask("id_test_mask")
     masks["ood_val"] = _get_mask("ood_val_mask", "val_mask")
     masks["ood_test"] = _get_mask("ood_test_mask", "test_mask")
     return masks

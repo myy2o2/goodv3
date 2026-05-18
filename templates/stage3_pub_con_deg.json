@@ -1,5 +1,5 @@
 {
-  "pretrain_ckpt": "./outputs/stage1/pubmed/degree/concept/20260502-015953/pretrain_model.pt",
+  "pretrain_ckpt": "./outputs/stage1/pubmed/degree/concept/right/pretrain_model.pt",
   "dataset": "pubmed",
   "domain": "degree",
   "shift": "concept",

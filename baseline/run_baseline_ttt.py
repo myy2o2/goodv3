@@ -20,7 +20,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from ssl_tasks import build_ssl_tasks, parse_ssl_task_names
+from baseline.gtrans_paper import run_gtrans_once
+from baseline.eerm_right import run_eerm_right_once
 
 try:
     import optuna
@@ -29,7 +30,7 @@ except Exception:
 
 
 DATA_ROOT = Path("./datasets")
-METHODS = ("stage1", "eerm", "gtrans", "tent")
+METHODS = ("stage1", "eerm", "eerm_right", "gtrans", "tent")
 
 
 def resolve_dataset_path(dataset: str, domain: str, shift: str) -> Path:
@@ -140,10 +141,12 @@ class GNNNodeClassifier(nn.Module):
         return nn.Sequential(*layers)
 
     def get_embed(self, x: torch.Tensor, edge_index: torch.Tensor, edge_weight=None):
-        del edge_weight
         h = x
         for idx, conv in enumerate(self.convs):
-            h = conv(h, edge_index)
+            if self.gnn_type == "gcn" and edge_weight is not None:
+                h = conv(h, edge_index, edge_weight=edge_weight)
+            else:
+                h = conv(h, edge_index)
             if self.use_bn:
                 h = self.bns[idx](h)
             h = F.relu(h)
@@ -240,10 +243,10 @@ def set_trainable_blocks(
     return trainable
 
 
-def evaluate_model(model: GNNNodeClassifier, data, masks) -> Dict[str, float]:
+def evaluate_model(model: GNNNodeClassifier, data, masks, edge_weight=None) -> Dict[str, float]:
     model.eval()
     with torch.no_grad():
-        logits = model(data.x, data.edge_index)
+        logits = model(data.x, data.edge_index, edge_weight=edge_weight)
     return {
         "id_val_acc": accuracy(logits, data.y, masks["id_val"]),
         "id_test_acc": accuracy(logits, data.y, masks["id_test"]),
@@ -278,35 +281,13 @@ def split_env_masks_by_degree(data, base_mask: torch.Tensor, num_envs: int) -> L
     return env_masks if env_masks else [base_mask]
 
 
-def build_ssl_tasks_for_gtrans(args, device: torch.device, hidden_dim: int, input_dim: int):
-    task_cfg = json.loads(args.task_cfg_json) if args.task_cfg_json else {}
-    task_names = parse_ssl_task_names(args.ssl_tasks)
-    if not task_names:
-        raise ValueError("No SSL tasks selected for gtrans baseline")
-    tasks = build_ssl_tasks(
-        task_names,
-        task_cfg=task_cfg,
-        device=device,
-        hidden_dim=hidden_dim,
-        input_dim=input_dim,
-    )
-    return tasks, task_names, task_cfg
-
-
-def compute_method_loss(method: str, model: GNNNodeClassifier, data, masks, ssl_tasks, train_cfg: Dict[str, float]) -> torch.Tensor:
+def compute_method_loss(method: str, model: GNNNodeClassifier, data, masks, train_cfg: Dict[str, float]) -> torch.Tensor:
     ood_mask = masks["ood_test"]
 
     if method == "tent":
         logits = model(data.x, data.edge_index)
         node_loss = entropy_loss(logits)
         return node_loss[ood_mask].mean()
-
-    if method == "gtrans":
-        total = torch.tensor(0.0, device=data.x.device)
-        for task in ssl_tasks:
-            node_loss = task.compute_node_loss(model, data.x, data.edge_index)
-            total = total + node_loss[ood_mask].mean()
-        return total
 
     if method == "eerm":
         logits = model(data.x, data.edge_index)
@@ -353,6 +334,30 @@ def run_method_once(args, method: str, data, masks, pre_ckpt, train_cfg: Dict[st
         }
         return best_metrics, artifacts
 
+    if method == "gtrans":
+        metrics, artifacts = run_gtrans_once(
+            args=args,
+            model=model,
+            data=data,
+            masks=masks,
+            train_cfg=train_cfg,
+            model_cfg=model_cfg,
+            verbose=verbose,
+        )
+        return metrics, artifacts
+
+    if method == "eerm_right":
+        metrics, artifacts = run_eerm_right_once(
+            args=args,
+            model=model,
+            data=data,
+            masks=masks,
+            train_cfg=train_cfg,
+            model_cfg=model_cfg,
+            verbose=verbose,
+        )
+        return metrics, artifacts
+
     update_bn_only = bool(train_cfg.get("tent_update_bn_only", False) and method == "tent")
     trainable_params = set_trainable_blocks(
         model,
@@ -362,21 +367,7 @@ def run_method_once(args, method: str, data, masks, pre_ckpt, train_cfg: Dict[st
     if len(trainable_params) == 0:
         raise RuntimeError("No trainable parameters selected for method {}".format(method))
 
-    ssl_tasks = None
-    task_names: List[str] = []
-    task_cfg: Dict[str, object] = {}
     param_groups = [{"params": trainable_params, "lr": float(train_cfg["encoder_lr"])}]
-
-    if method == "gtrans":
-        ssl_tasks, task_names, task_cfg = build_ssl_tasks_for_gtrans(
-            args=args,
-            device=data.x.device,
-            hidden_dim=int(model_cfg["hidden_dim"]),
-            input_dim=int(model_cfg["in_dim"]),
-        )
-        ssl_params = list(ssl_tasks.parameters())
-        if len(ssl_params) > 0:
-            param_groups.append({"params": ssl_params, "lr": float(train_cfg["ssl_lr"])})
 
     optimizer = torch.optim.Adam(param_groups, weight_decay=float(train_cfg["weight_decay"]))
 
@@ -387,8 +378,6 @@ def run_method_once(args, method: str, data, masks, pre_ckpt, train_cfg: Dict[st
 
     for epoch in range(1, int(train_cfg["finetune_epochs"]) + 1):
         model.train()
-        if ssl_tasks is not None:
-            ssl_tasks.train()
         optimizer.zero_grad()
 
         loss = compute_method_loss(
@@ -396,7 +385,6 @@ def run_method_once(args, method: str, data, masks, pre_ckpt, train_cfg: Dict[st
             model=model,
             data=data,
             masks=masks,
-            ssl_tasks=ssl_tasks,
             train_cfg=train_cfg,
         )
         if loss.requires_grad:
@@ -416,8 +404,8 @@ def run_method_once(args, method: str, data, masks, pre_ckpt, train_cfg: Dict[st
 
     artifacts = {
         "method": method,
-        "task_names": task_names,
-        "task_cfg": task_cfg,
+        "task_names": [],
+        "task_cfg": {},
         "history": history,
         "model_cfg": model_cfg,
         "model_state_dict": model.state_dict(),
@@ -436,13 +424,33 @@ def build_search_space(method: str, trial, args, num_layers: int) -> Dict[str, f
         "eerm_num_envs": int(args.eerm_num_envs),
         "eerm_var_lambda": float(args.eerm_var_lambda),
         "tent_update_bn_only": bool(args.tent_update_bn_only),
+        "gtrans_loss": str(args.gtrans_loss),
+        "gtrans_strategy": str(args.gtrans_strategy),
+        "gtrans_margin": float(args.gtrans_margin),
+        "gtrans_ratio": float(args.gtrans_ratio),
+        "gtrans_loop_feat": int(args.gtrans_loop_feat),
+        "gtrans_loop_adj": int(args.gtrans_loop_adj),
+        "eerm_right_k": int(args.eerm_right_k),
+        "eerm_right_t": int(args.eerm_right_t),
+        "eerm_right_num_sample": int(args.eerm_right_num_sample),
+        "eerm_right_beta": float(args.eerm_right_beta),
     }
 
     if method == "gtrans":
-        cfg["ssl_lr"] = trial.suggest_float("ssl_lr", 1e-5, 1e-3, log=True)
+        cfg["encoder_lr"] = trial.suggest_float("encoder_lr", 1e-5, 1e-2, log=True)
+        cfg["ssl_lr"] = trial.suggest_float("ssl_lr", 1e-5, 1e-2, log=True)
+        cfg["gtrans_ratio"] = trial.suggest_float("gtrans_ratio", 0.01, 0.3, log=True)
+        cfg["gtrans_margin"] = trial.suggest_float("gtrans_margin", -1.0, 0.5)
+        cfg["gtrans_loop_feat"] = int(trial.suggest_int("gtrans_loop_feat", 1, 6))
+        cfg["gtrans_loop_adj"] = int(trial.suggest_int("gtrans_loop_adj", 0, 3))
     if method == "eerm":
         cfg["eerm_num_envs"] = int(trial.suggest_int("eerm_num_envs", 2, 6))
         cfg["eerm_var_lambda"] = trial.suggest_float("eerm_var_lambda", 1e-3, 2.0, log=True)
+    if method == "eerm_right":
+        cfg["eerm_right_k"] = int(trial.suggest_int("eerm_right_k", 2, 5))
+        cfg["eerm_right_t"] = int(trial.suggest_int("eerm_right_t", 1, 3))
+        cfg["eerm_right_num_sample"] = int(trial.suggest_int("eerm_right_num_sample", 1, 3))
+        cfg["eerm_right_beta"] = trial.suggest_float("eerm_right_beta", 0.1, 2.0, log=True)
     if method == "tent":
         cfg["tent_update_bn_only"] = bool(trial.suggest_categorical("tent_update_bn_only", [True, False]))
 
@@ -459,6 +467,16 @@ def default_train_cfg(args, method: str, num_layers: int) -> Dict[str, float]:
         "eerm_num_envs": int(args.eerm_num_envs),
         "eerm_var_lambda": float(args.eerm_var_lambda),
         "tent_update_bn_only": bool(args.tent_update_bn_only),
+        "gtrans_loss": str(args.gtrans_loss),
+        "gtrans_strategy": str(args.gtrans_strategy),
+        "gtrans_margin": float(args.gtrans_margin),
+        "gtrans_ratio": float(args.gtrans_ratio),
+        "gtrans_loop_feat": int(args.gtrans_loop_feat),
+        "gtrans_loop_adj": int(args.gtrans_loop_adj),
+        "eerm_right_k": int(args.eerm_right_k),
+        "eerm_right_t": int(args.eerm_right_t),
+        "eerm_right_num_sample": int(args.eerm_right_num_sample),
+        "eerm_right_beta": float(args.eerm_right_beta),
     }
 
 
@@ -469,10 +487,8 @@ def parse_args():
     parser.add_argument("--domain", type=str, default="")
     parser.add_argument("--shift", type=str, default="")
 
-    parser.add_argument("--method", type=str, default="all", choices=["all", "stage1", "eerm", "gtrans", "tent"])
+    parser.add_argument("--method", type=str, default="all", choices=["all", "stage1", "eerm", "eerm_right", "gtrans", "tent"])
     parser.add_argument("--include-stage1-baseline", action="store_true")
-    parser.add_argument("--ssl-tasks", type=str, default="homottt")
-    parser.add_argument("--task-cfg-json", type=str, default="{}")
 
     parser.add_argument("--ssl-lr", type=float, default=1e-3)
     parser.add_argument("--encoder-lr", type=float, default=5e-4)
@@ -483,6 +499,18 @@ def parse_args():
     parser.add_argument("--eerm-num-envs", type=int, default=3)
     parser.add_argument("--eerm-var-lambda", type=float, default=0.1)
     parser.add_argument("--tent-update-bn-only", action="store_true")
+
+    parser.add_argument("--gtrans-loss", type=str, default="LC", help="Paper loss spec, e.g. LC, LC+recon, LC+entropy")
+    parser.add_argument("--gtrans-strategy", type=str, default="dropedge", choices=["dropedge", "dropnode", "rwsample"])
+    parser.add_argument("--gtrans-margin", type=float, default=-1.0)
+    parser.add_argument("--gtrans-ratio", type=float, default=0.1)
+    parser.add_argument("--gtrans-loop-feat", type=int, default=4)
+    parser.add_argument("--gtrans-loop-adj", type=int, default=1)
+
+    parser.add_argument("--eerm-right-k", type=int, default=5)
+    parser.add_argument("--eerm-right-t", type=int, default=1)
+    parser.add_argument("--eerm-right-num-sample", type=int, default=1)
+    parser.add_argument("--eerm-right-beta", type=float, default=1.0)
 
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
@@ -539,6 +567,8 @@ def run_one_method(args, method: str, data, masks, pre_ckpt, base_out_dir: Path)
                 verbose=False,
             )
             score = metrics_tmp["ood_test_acc"]
+            if method in {"gtrans", "eerm_right"} and not np.isnan(metrics_tmp.get("ood_val_acc", float("nan"))):
+                score = metrics_tmp["ood_val_acc"]
             if np.isnan(score):
                 score = -1.0
             if score > best_trial_score:
@@ -602,8 +632,6 @@ def run_one_method(args, method: str, data, masks, pre_ckpt, base_out_dir: Path)
         "domain": args.domain,
         "shift": args.shift,
         "pretrain_ckpt": str(args.pretrain_ckpt),
-        "ssl_tasks": str(args.ssl_tasks),
-        "task_cfg_json": str(args.task_cfg_json),
         "encoder_lr": float(best_train_cfg["encoder_lr"]),
         "ssl_lr": float(best_train_cfg["ssl_lr"]),
         "weight_decay": float(best_train_cfg["weight_decay"]),
@@ -612,6 +640,16 @@ def run_one_method(args, method: str, data, masks, pre_ckpt, base_out_dir: Path)
         "eerm_num_envs": int(best_train_cfg["eerm_num_envs"]),
         "eerm_var_lambda": float(best_train_cfg["eerm_var_lambda"]),
         "tent_update_bn_only": bool(best_train_cfg["tent_update_bn_only"]),
+        "gtrans_loss": str(best_train_cfg["gtrans_loss"]),
+        "gtrans_strategy": str(best_train_cfg["gtrans_strategy"]),
+        "gtrans_margin": float(best_train_cfg["gtrans_margin"]),
+        "gtrans_ratio": float(best_train_cfg["gtrans_ratio"]),
+        "gtrans_loop_feat": int(best_train_cfg["gtrans_loop_feat"]),
+        "gtrans_loop_adj": int(best_train_cfg["gtrans_loop_adj"]),
+        "eerm_right_k": int(best_train_cfg["eerm_right_k"]),
+        "eerm_right_t": int(best_train_cfg["eerm_right_t"]),
+        "eerm_right_num_sample": int(best_train_cfg["eerm_right_num_sample"]),
+        "eerm_right_beta": float(best_train_cfg["eerm_right_beta"]),
         "use_optuna": bool(args.use_optuna),
         "optuna_trials": int(args.optuna_trials),
         "optuna_timeout": int(args.optuna_timeout),
@@ -660,7 +698,7 @@ def main():
     base_out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.method == "all":
-        methods = ["eerm", "gtrans", "tent"]
+        methods = ["eerm", "eerm_right", "gtrans", "tent"]
         if args.include_stage1_baseline:
             methods = ["stage1"] + methods
     else:
