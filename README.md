@@ -15,7 +15,7 @@
 datasets/<GOODDataset>/<domain>/processed/<shift>.pt
 ```
 
-当前脚本支持的常用配置：
+当前脚本支持的常用配置例如：
 
 | Dataset | Domain | Shift | Stage 1 params | Stage 2 params |
 | --- | --- | --- | --- | --- |
@@ -23,12 +23,7 @@ datasets/<GOODDataset>/<domain>/processed/<shift>.pt
 | Citeseer | word | covariate | `templates/stage1_cit_cov_word.json` | `templates/stage2_cit_cov_word.json` |
 | Cora | degree | concept | `templates/stage1_cora_con_deg.json` | `templates/stage2_cora_con_deg.json` |
 | Cora | word | covariate | `templates/stage1_cora_cov_word.json` | `templates/stage2_cora_cov_word.json` |
-| Pubmed | degree | concept | `templates/stage1_pub_con_deg.json` | `templates/stage2_pub_con_deg.json` |
-| Pubmed | word | covariate | `templates/stage1_pub_cov_word.json` | `templates/stage2_pub_cov_word.json` |
-| WikiCS | degree | concept | `templates/stage1_wikics_con_deg.json` | `templates/stage2_wikics_con_deg.json` |
-| WikiCS | word | covariate | `templates/stage1_wikics_cov_word.json` | `templates/stage2_wikics_cov_word.json` |
-| Arxiv | degree | concept | `templates/stage1_arxiv_con_deg.json` | `templates/stage2_arxiv_con_deg.json` |
-| Arxiv | time | covariate | `templates/stage1_arxiv_cov_time.json` | `templates/stage2_arxiv_cov_time.json` |
+
 
 ## Stage 1: Pretrain
 
@@ -46,19 +41,13 @@ metrics.json
 params.json
 ```
 
-推荐把 `timestamp` 固定为 `right`，这样 Stage 2 参数文件里的默认 `pretrain_ckpt` 路径可以直接命中：
+推荐把 `timestamp` 固定为 `right`，这样 Stage 2 参数文件里的默认 `pretrain_ckpt` 路径可以直接命中，例如：
 
 ```bash
 python pretrain.py --params-file templates/stage1_cit_con_deg.json --timestamp right
 python pretrain.py --params-file templates/stage1_cit_cov_word.json --timestamp right
 python pretrain.py --params-file templates/stage1_cora_con_deg.json --timestamp right
 python pretrain.py --params-file templates/stage1_cora_cov_word.json --timestamp right
-python pretrain.py --params-file templates/stage1_pub_con_deg.json --timestamp right
-python pretrain.py --params-file templates/stage1_pub_cov_word.json --timestamp right
-python pretrain.py --params-file templates/stage1_wikics_con_deg.json --timestamp right
-python pretrain.py --params-file templates/stage1_wikics_cov_word.json --timestamp right
-python pretrain.py --params-file templates/stage1_arxiv_con_deg.json --timestamp right
-python pretrain.py --params-file templates/stage1_arxiv_cov_time.json --timestamp right
 ```
 
 
@@ -98,14 +87,6 @@ ood_test_acc_vs_epoch.png
 运行全部配置：
 
 ```bash
-python tttnew.py --params-file templates/stage2_cit_con_deg.json
-python tttnew.py --params-file templates/stage2_cit_cov_word.json
-python tttnew.py --params-file templates/stage2_cora_con_deg.json
-python tttnew.py --params-file templates/stage2_cora_cov_word.json
-python tttnew.py --params-file templates/stage2_pub_con_deg.json
-python tttnew.py --params-file templates/stage2_pub_cov_word.json
-python tttnew.py --params-file templates/stage2_wikics_con_deg.json
-python tttnew.py --params-file templates/stage2_wikics_cov_word.json
 python tttnew.py --params-file templates/stage2_arxiv_con_deg.json
 python tttnew.py --params-file templates/stage2_arxiv_cov_time.json
 ```
