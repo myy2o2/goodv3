@@ -1,6 +1,6 @@
 {
-  "pretrain_ckpt": "./outputs/stage1/cora/word/covariate/right/pretrain_model.pt",
-  "dataset": "cora",
+  "pretrain_ckpt": "./outputs/stage1/wikics/word/covariate/right/pretrain_model.pt",
+  "dataset": "wikics",
   "domain": "word",
   "shift": "covariate",
   "ssl_lr": 0.001,
@@ -11,7 +11,7 @@
   "seed": 0,
   "device": "cuda",
   "use_optuna": true,
-  "optuna_trials": 400,
+  "optuna_trials": 200,
   "optuna_timeout": 0,
   "output_root": "./outputs",
   "timestamp": "",

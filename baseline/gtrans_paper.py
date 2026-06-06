@@ -1,31 +1,13 @@
 from __future__ import annotations
 
 import copy
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-import numpy as np
 import torch
 import torch.nn.functional as F
-from torch_geometric.utils import degree, dropout_edge
+from torch_geometric.utils import dropout_edge
 
-
-def _accuracy(logits: torch.Tensor, y: torch.Tensor, mask: Optional[torch.Tensor]) -> float:
-    if mask is None or int(mask.sum()) == 0:
-        return float("nan")
-    pred = logits[mask].argmax(dim=-1)
-    return float((pred == y[mask]).float().mean().item())
-
-
-@torch.no_grad()
-def _evaluate(model, data, masks, edge_weight=None) -> Dict[str, float]:
-    model.eval()
-    logits = model(data.x, data.edge_index, edge_weight=edge_weight)
-    return {
-        "id_val_acc": _accuracy(logits, data.y, masks["id_val"]),
-        "id_test_acc": _accuracy(logits, data.y, masks["id_test"]),
-        "ood_val_acc": _accuracy(logits, data.y, masks["ood_val"]),
-        "ood_test_acc": _accuracy(logits, data.y, masks["ood_test"]),
-    }
+from baseline.common import base_adaptation_search_space, base_adaptation_train_cfg, evaluate_model
 
 
 def _cosine_per_example(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -92,13 +74,44 @@ def _augment(model, feat: torch.Tensor, edge_index: torch.Tensor, edge_weight=No
     return model.get_embed(feat, edge_index, edge_weight=edge_weight)
 
 
-def _test_time_loss(args, model, feat: torch.Tensor, edge_index: torch.Tensor, edge_weight=None):
+def build_gtrans_train_cfg(args, num_layers: int) -> Dict[str, object]:
+    cfg = base_adaptation_train_cfg(args, num_layers)
+    cfg.update(
+        {
+            "gtrans_loss": str(args.gtrans_loss),
+            "gtrans_strategy": str(args.gtrans_strategy),
+            "gtrans_margin": float(args.gtrans_margin),
+            "gtrans_ratio": float(args.gtrans_ratio),
+            "gtrans_loop_feat": int(args.gtrans_loop_feat),
+            "gtrans_loop_adj": int(args.gtrans_loop_adj),
+        }
+    )
+    return cfg
+
+
+def build_gtrans_search_space(trial, args, num_layers: int) -> Dict[str, object]:
+    cfg = base_adaptation_search_space(trial, args, num_layers)
+    cfg.update(
+        {
+            "ssl_lr": trial.suggest_float("ssl_lr", 1e-5, 1e-2, log=True),
+            "gtrans_ratio": trial.suggest_float("gtrans_ratio", 0.01, 0.3, log=True),
+            "gtrans_margin": trial.suggest_float("gtrans_margin", -1.0, 0.5),
+            "gtrans_loop_feat": int(trial.suggest_int("gtrans_loop_feat", 1, 6)),
+            "gtrans_loop_adj": int(trial.suggest_int("gtrans_loop_adj", 0, 3)),
+            "gtrans_loss": str(args.gtrans_loss),
+            "gtrans_strategy": str(args.gtrans_strategy),
+        }
+    )
+    return cfg
+
+
+def _test_time_loss(train_cfg: Dict[str, object], model, feat: torch.Tensor, edge_index: torch.Tensor, edge_weight=None):
     loss = torch.tensor(0.0, device=feat.device)
-    loss_spec = str(getattr(args, "gtrans_loss", "LC")).lower()
+    loss_spec = str(train_cfg["gtrans_loss"]).lower()
 
     if "lc" in loss_spec:
-        strategy = str(getattr(args, "gtrans_strategy", "dropedge")).lower()
-        margin = float(getattr(args, "gtrans_margin", -1.0))
+        strategy = str(train_cfg["gtrans_strategy"]).lower()
+        margin = float(train_cfg["gtrans_margin"])
         output1 = _augment(model, feat, edge_index, edge_weight=edge_weight, strategy=strategy, p=0.05)
         output2 = _augment(model, feat, edge_index, edge_weight=edge_weight, strategy="dropedge", p=0.0)
         output3 = _augment(model, feat, edge_index, edge_weight=edge_weight, strategy="shuffle", p=0.0)
@@ -120,7 +133,7 @@ def _test_time_loss(args, model, feat: torch.Tensor, edge_index: torch.Tensor, e
     return loss
 
 
-def run_gtrans_once(args, model, data, masks, train_cfg: Dict[str, float], model_cfg: Dict[str, object], verbose: bool = True):
+def run_gtrans_once(args, model, data, masks, train_cfg: Dict[str, object], model_cfg: Dict[str, object], verbose: bool = True):
     for param in model.parameters():
         param.requires_grad = False
     model.eval()
@@ -139,7 +152,7 @@ def run_gtrans_once(args, model, data, masks, train_cfg: Dict[str, float], model
     opt_feat = torch.optim.Adam([delta_feat], lr=feat_lr)
     opt_adj = torch.optim.Adam([edge_remove], lr=adj_lr)
 
-    best_metrics = _evaluate(model, data, masks)
+    best_metrics = evaluate_model(model, data, masks)
     history: List[Dict[str, float]] = [{"epoch": 0, "loss": float("nan"), **best_metrics}]
 
     for epoch in range(1, int(train_cfg["finetune_epochs"]) + 1):
@@ -148,7 +161,7 @@ def run_gtrans_once(args, model, data, masks, train_cfg: Dict[str, float], model
 
         for _ in range(loop_feat):
             opt_feat.zero_grad()
-            loss = _test_time_loss(args, model, transformed_feat, edge_index, edge_weight=edge_weight)
+            loss = _test_time_loss(train_cfg, model, transformed_feat, edge_index, edge_weight=edge_weight)
             if loss.requires_grad:
                 loss.backward()
                 opt_feat.step()
@@ -159,7 +172,7 @@ def run_gtrans_once(args, model, data, masks, train_cfg: Dict[str, float], model
             opt_adj.zero_grad()
             transformed_feat = feat + delta_feat.detach()
             edge_weight = (1.0 - edge_remove).clamp_min(1e-7).clamp_max(1.0 - 1e-7)
-            loss = _test_time_loss(args, model, transformed_feat, edge_index, edge_weight=edge_weight)
+            loss = _test_time_loss(train_cfg, model, transformed_feat, edge_index, edge_weight=edge_weight)
             if loss.requires_grad:
                 loss.backward()
                 opt_adj.step()
@@ -169,8 +182,8 @@ def run_gtrans_once(args, model, data, masks, train_cfg: Dict[str, float], model
         with torch.no_grad():
             transformed_feat = feat + delta_feat
             edge_weight = (1.0 - edge_remove).clamp_min(1e-7).clamp_max(1.0 - 1e-7)
-            loss = _test_time_loss(args, model, transformed_feat, edge_index, edge_weight=edge_weight)
-            metrics = _evaluate(model, data, masks, edge_weight=edge_weight)
+            loss = _test_time_loss(train_cfg, model, transformed_feat, edge_index, edge_weight=edge_weight)
+            metrics = evaluate_model(model, data, masks, x=transformed_feat, edge_weight=edge_weight)
             history.append({"epoch": int(epoch), "loss": float(loss.item()), **metrics})
             if verbose and epoch == 1:
                 print("[gtrans] epoch 1 loss={:.6f}".format(float(loss.item())))
@@ -178,7 +191,7 @@ def run_gtrans_once(args, model, data, masks, train_cfg: Dict[str, float], model
     with torch.no_grad():
         transformed_feat = feat + delta_feat
         edge_weight = (1.0 - edge_remove).clamp_min(1e-7).clamp_max(1.0 - 1e-7)
-        final_metrics = _evaluate(model, data, masks, edge_weight=edge_weight)
+        final_metrics = evaluate_model(model, data, masks, x=transformed_feat, edge_weight=edge_weight)
 
     if verbose:
         print("[gtrans] final ood_test_acc={:.6f}".format(float(final_metrics["ood_test_acc"])))

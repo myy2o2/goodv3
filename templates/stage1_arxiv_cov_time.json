@@ -1,7 +1,7 @@
 {
-  "dataset": "citeseer",
-  "domain": "degree",
-  "shift": "concept",
+  "dataset": "arxiv",
+  "domain": "time",
+  "shift": "covariate",
   "gnn_type": "gcn",
   "hidden_dim": 32,
   "num_layers": 4,
@@ -10,7 +10,7 @@
   "use_bn": true,
   "lr": 0.01,
   "weight_decay": 0.0005,
-  "epochs": 300,
+  "epochs": 200,
   "patience": 50,
   "seed": 0,
   "device": "cuda",
@@ -18,6 +18,6 @@
   "optuna_trials": 200,
   "optuna_timeout": 0,
   "output_root": "./outputs",
-  "timestamp": "",
+  "timestamp": "right",
   "run_name": "pretrain"
 }

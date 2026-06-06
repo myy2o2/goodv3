@@ -1,6 +1,6 @@
 {
-  "pretrain_ckpt": "./outputs/stage1/pubmed/degree/concept/right/pretrain_model.pt",
-  "dataset": "pubmed",
+  "pretrain_ckpt": "./outputs/stage1/wikics/degree/concept/right/pretrain_model.pt",
+  "dataset": "wikics",
   "domain": "degree",
   "shift": "concept",
   "ssl_tasks": "consistency,contrastive,homottt",
@@ -12,7 +12,7 @@
   "gate_temperature": 3.0,
   "lr": 0.001,
   "weight_decay": 0.00001,
-  "epochs": 200,
+  "epochs": 100,
   "patience": 20,
   "seed": 0,
   "device": "cuda",

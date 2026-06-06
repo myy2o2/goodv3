@@ -4,12 +4,12 @@ import argparse
 import copy
 import json
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
 
-from ssl_tasks import build_ssl_tasks
+from ssl_tasks import available_ssl_tasks, build_ssl_tasks, parse_ssl_task_names
 from ttt import (
     GNNNodeClassifier,
     GateMLP,
@@ -32,6 +32,29 @@ except Exception:
     optuna = None
 
 
+def parse_task_cfg_json(task_cfg_json: str) -> Dict[str, object]:
+    if not task_cfg_json:
+        return {}
+    task_cfg = json.loads(task_cfg_json)
+    if not isinstance(task_cfg, dict):
+        raise ValueError("task_cfg_json must decode to a JSON object")
+    return task_cfg
+
+
+def resolve_task_names(ssl_tasks: str, num_ssl: int) -> List[str]:
+    if str(ssl_tasks).strip().lower() == "all":
+        task_names = available_ssl_tasks()
+    else:
+        task_names = parse_ssl_task_names(ssl_tasks)
+    if int(num_ssl) > 0:
+        if int(num_ssl) > len(task_names):
+            raise ValueError("num_ssl={} is larger than parsed task count={}".format(num_ssl, len(task_names)))
+        task_names = task_names[: int(num_ssl)]
+    if not task_names:
+        raise ValueError("No SSL tasks selected. Provide --gate-ckpt or --ssl-tasks.")
+    return task_names
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Stage-3 TTT with uniform branch averaging")
     parser.add_argument("--pretrain-ckpt", type=str, default="")
@@ -40,6 +63,10 @@ def parse_args():
     parser.add_argument("--dataset", type=str, default="")
     parser.add_argument("--domain", type=str, default="")
     parser.add_argument("--shift", type=str, default="")
+
+    parser.add_argument("--ssl-tasks", type=str, default="")
+    parser.add_argument("--num-ssl", type=int, default=0)
+    parser.add_argument("--task-cfg-json", type=str, default="")
 
     parser.add_argument("--ssl-lr", type=float, default=1e-3)
     parser.add_argument("--encoder-lr", type=float, default=5e-4)
@@ -63,9 +90,23 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_ttt_avg_once(args, data, masks, pre_ckpt, gate_ckpt, train_cfg: Dict[str, float], verbose: bool = True):
+def run_ttt_avg_once(
+    args,
+    data,
+    masks,
+    pre_ckpt,
+    gate_ckpt: Optional[Dict[str, object]],
+    task_names: List[str],
+    task_cfg: Dict[str, object],
+    train_cfg: Dict[str, float],
+    verbose: bool = True,
+):
     model_cfg = pre_ckpt["model_cfg"]
     ood_test_mask = masks["ood_test"]
+    task_names = list(task_names)
+    task_cfg = dict(task_cfg or {})
+    if not task_names:
+        raise ValueError("ttt_avg requires at least one SSL task")
 
     pre_model = GNNNodeClassifier(
         in_dim=int(model_cfg["in_dim"]),
@@ -80,22 +121,28 @@ def run_ttt_avg_once(args, data, masks, pre_ckpt, gate_ckpt, train_cfg: Dict[str
     pre_model.load_state_dict(pre_ckpt["state_dict"])
     pre_model.eval()
 
-    gate_cfg = gate_ckpt["gate_cfg"]
-    gate = GateMLP(
-        in_dim=int(gate_cfg["in_dim"]),
-        hidden_dim=int(gate_cfg["hidden_dim"]),
-        num_layers=int(gate_cfg["num_layers"]),
-        out_dim=int(gate_cfg["out_dim"]),
-        dropout=float(gate_cfg["dropout"]),
-        temperature=float(gate_cfg.get("temperature", 1.0)),
-    ).to(data.x.device)
-    gate.load_state_dict(gate_ckpt["gate_state_dict"])
-    gate.eval()
-    for p in gate.parameters():
-        p.requires_grad = False
+    gate = None
+    gate_cfg = {
+        "mode": "uniform_average_no_gate",
+        "in_dim": int(model_cfg["hidden_dim"]),
+        "out_dim": int(len(task_names)),
+        "temperature": None,
+    }
+    if gate_ckpt is not None:
+        gate_cfg = gate_ckpt["gate_cfg"]
+        gate = GateMLP(
+            in_dim=int(gate_cfg["in_dim"]),
+            hidden_dim=int(gate_cfg["hidden_dim"]),
+            num_layers=int(gate_cfg["num_layers"]),
+            out_dim=int(gate_cfg["out_dim"]),
+            dropout=float(gate_cfg["dropout"]),
+            temperature=float(gate_cfg.get("temperature", 1.0)),
+        ).to(data.x.device)
+        gate.load_state_dict(gate_ckpt["gate_state_dict"])
+        gate.eval()
+        for p in gate.parameters():
+            p.requires_grad = False
 
-    task_names = gate_ckpt["task_names"]
-    task_cfg = gate_ckpt.get("task_cfg", {})
     replace_last_k_layers = clamp_replace_last_k_layers(
         int(train_cfg.get("replace_last_k_layers", 1)),
         int(model_cfg["num_layers"]),
@@ -209,17 +256,36 @@ def run_ttt_avg_once(args, data, masks, pre_ckpt, gate_ckpt, train_cfg: Dict[str
     for model_i, state in zip(adapted_models, best_model_states):
         model_i.load_state_dict(state)
 
-    with torch.no_grad():
-        gate_probe = gate(pre_model.get_embed(data.x, data.edge_index))
+    uniform_weight = 1.0 / max(len(task_names), 1)
+    if gate is not None:
+        with torch.no_grad():
+            gate_probe = gate(pre_model.get_embed(data.x, data.edge_index))
+        gate_weight_stats = {
+            "task_weight_mean": gate_probe.mean(dim=0).detach().cpu().tolist(),
+            "task_weight_min": gate_probe.min(dim=0).values.detach().cpu().tolist(),
+            "task_weight_max": gate_probe.max(dim=0).values.detach().cpu().tolist(),
+            "sum_mean": float(gate_probe.sum(dim=-1).mean().item()),
+            "source": "loaded_gate_probe",
+        }
+        gate_state_dict = gate.state_dict()
+    else:
+        gate_weight_stats = {
+            "task_weight_mean": [float(uniform_weight)] * len(task_names),
+            "task_weight_min": [float(uniform_weight)] * len(task_names),
+            "task_weight_max": [float(uniform_weight)] * len(task_names),
+            "sum_mean": 1.0 if task_names else 0.0,
+            "source": "uniform_average_no_gate",
+        }
+        gate_state_dict = {}
 
     if verbose:
         print("Adapted branches: {}".format(", ".join("{}:{}".format(i + 1, name) for i, name in enumerate(task_names))))
-        print("[ttt_avg] uniform branch weight={:.6f}".format(1.0 / max(len(task_names), 1)))
+        print("[ttt_avg] uniform branch weight={:.6f}".format(uniform_weight))
 
     artifacts = {
         "model_cfg": model_cfg,
         "gate_cfg": gate_cfg,
-        "gate_state_dict": gate.state_dict(),
+        "gate_state_dict": gate_state_dict,
         "classifier_state_dict": pre_model.classifier.state_dict(),
         "adapted_model_state_dicts": [model_i.state_dict() for model_i in adapted_models],
         "task_names": task_names,
@@ -227,33 +293,34 @@ def run_ttt_avg_once(args, data, masks, pre_ckpt, gate_ckpt, train_cfg: Dict[str
         "replace_last_k_layers": int(replace_last_k_layers),
         "history": history,
         "fusion_mode": "uniform_average",
-        "gate_weight_stats": {
-            "task_weight_mean": gate_probe.mean(dim=0).detach().cpu().tolist(),
-            "task_weight_min": gate_probe.min(dim=0).values.detach().cpu().tolist(),
-            "task_weight_max": gate_probe.max(dim=0).values.detach().cpu().tolist(),
-            "sum_mean": float(gate_probe.sum(dim=-1).mean().item()),
-        },
+        "gate_weight_stats": gate_weight_stats,
     }
     return best_metrics if best_metrics is not None else initial_metrics, artifacts
 
 
 def main():
     args = parse_args()
-    if not args.pretrain_ckpt or not args.gate_ckpt:
-        raise ValueError("--pretrain-ckpt and --gate-ckpt are required (or provide them via --params-file)")
+    if not args.pretrain_ckpt:
+        raise ValueError("--pretrain-ckpt is required (or provide it via --params-file)")
 
     set_seed(int(args.seed))
     device = torch.device(args.device)
 
     pre_ckpt_path = Path(args.pretrain_ckpt)
     pre_ckpt = safe_torch_load(pre_ckpt_path)
-    gate_ckpt = safe_torch_load(Path(args.gate_ckpt))
+    gate_ckpt = safe_torch_load(Path(args.gate_ckpt)) if args.gate_ckpt else None
     pre_ckpt["model_cfg"] = normalize_pretrain_model_cfg(pre_ckpt, pre_ckpt_path)
 
     model_cfg = pre_ckpt["model_cfg"]
-    dataset = args.dataset or gate_ckpt.get("dataset", pre_ckpt["dataset"])
-    domain = args.domain or gate_ckpt.get("domain", pre_ckpt["domain"])
-    shift = args.shift or gate_ckpt.get("shift", pre_ckpt["shift"])
+    dataset = args.dataset or (gate_ckpt.get("dataset") if gate_ckpt is not None else "") or pre_ckpt["dataset"]
+    domain = args.domain or (gate_ckpt.get("domain") if gate_ckpt is not None else "") or pre_ckpt["domain"]
+    shift = args.shift or (gate_ckpt.get("shift") if gate_ckpt is not None else "") or pre_ckpt["shift"]
+    if gate_ckpt is not None:
+        task_names = list(gate_ckpt["task_names"])
+        task_cfg = dict(gate_ckpt.get("task_cfg", {}))
+    else:
+        task_names = resolve_task_names(args.ssl_tasks, int(args.num_ssl))
+        task_cfg = parse_task_cfg_json(args.task_cfg_json)
     data, masks, data_path = load_good_data(dataset, domain, shift, device)
 
     if args.use_optuna:
@@ -274,6 +341,8 @@ def main():
                 masks=masks,
                 pre_ckpt=pre_ckpt,
                 gate_ckpt=gate_ckpt,
+                task_names=task_names,
+                task_cfg=task_cfg,
                 train_cfg=train_cfg,
                 verbose=False,
             )
@@ -311,6 +380,8 @@ def main():
             masks=masks,
             pre_ckpt=pre_ckpt,
             gate_ckpt=gate_ckpt,
+            task_names=task_names,
+            task_cfg=task_cfg,
             train_cfg=best_train_cfg,
             verbose=True,
         )
@@ -366,6 +437,9 @@ def main():
         "shift": shift,
         "pretrain_ckpt": str(args.pretrain_ckpt),
         "gate_ckpt": str(args.gate_ckpt),
+        "ssl_tasks": ",".join(task_names),
+        "num_ssl": int(len(task_names)),
+        "task_cfg_json": json.dumps(task_cfg, ensure_ascii=True),
         "ssl_lr": float(best_train_cfg["ssl_lr"]),
         "encoder_lr": float(best_train_cfg["encoder_lr"]),
         "weight_decay": float(best_train_cfg["weight_decay"]),

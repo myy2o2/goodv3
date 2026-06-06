@@ -11,7 +11,7 @@
   "seed": 0,
   "device": "cuda",
   "use_optuna": true,
-  "optuna_trials": 100,
+  "optuna_trials": 400,
   "optuna_timeout": 0,
   "output_root": "./outputs",
   "timestamp": "",

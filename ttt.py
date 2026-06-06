@@ -6,7 +6,7 @@ import json
 import random
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 import matplotlib
 
@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATConv, GCNConv, SAGEConv
 
-from ssl_tasks import build_ssl_tasks
+from ssl_tasks import build_ssl_tasks, parse_ssl_task_names
 
 try:
     import optuna
@@ -36,7 +36,7 @@ def resolve_dataset_path(dataset: str, domain: str, shift: str) -> Path:
         "citeseer": ["GOODCiteseer"],
         "cora": ["GOODCora"],
         "pubmed": ["GOODPubmed"],
-        "wikics": ["GOODWikiCS", "GOODwikics"],
+        "wikics": ["GOODWikiCS", "GOODwikics", "GOODWikics"],
         "ogbn-arxiv": ["GOODArxiv"],
         "arxiv": ["GOODArxiv"],
     }.get(dataset_key)
@@ -216,6 +216,26 @@ def load_flat_params(params_file: str) -> Dict[str, object]:
     return params
 
 
+def parse_task_cfg_json(task_cfg_json: str) -> Dict[str, object]:
+    if not task_cfg_json:
+        return {}
+    task_cfg = json.loads(task_cfg_json)
+    if not isinstance(task_cfg, dict):
+        raise ValueError("task_cfg_json must decode to a JSON object")
+    return task_cfg
+
+
+def resolve_task_names(ssl_tasks: str, num_ssl: int) -> list[str]:
+    task_names = parse_ssl_task_names(ssl_tasks)
+    if int(num_ssl) > 0:
+        if int(num_ssl) > len(task_names):
+            raise ValueError("num_ssl={} is larger than parsed task count={}".format(num_ssl, len(task_names)))
+        task_names = task_names[: int(num_ssl)]
+    if not task_names:
+        raise ValueError("No SSL tasks selected. Provide --ssl-tasks when --gate-ckpt is not used.")
+    return task_names
+
+
 def normalize_pretrain_model_cfg(pre_ckpt: Dict[str, object], pre_ckpt_path: Path) -> Dict[str, object]:
     model_cfg = dict(pre_ckpt.get("model_cfg", {}))
     params_path = pre_ckpt_path.parent / "params.json"
@@ -236,6 +256,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Stage-3 TTT with per-SSL adapted encoders")
     parser.add_argument("--pretrain-ckpt", type=str, default="")
     parser.add_argument("--gate-ckpt", type=str, default="")
+    parser.add_argument("--ssl-tasks", type=str, default="")
+    parser.add_argument("--num-ssl", type=int, default=1)
+    parser.add_argument("--task-cfg-json", type=str, default="")
 
     parser.add_argument("--dataset", type=str, default="")
     parser.add_argument("--domain", type=str, default="")
@@ -324,23 +347,35 @@ def run_ttt_once( # 1) 恢复 stage1 预训练模型（含 classifier）
     ).to(data.x.device)
     pre_model.load_state_dict(pre_ckpt["state_dict"])
     pre_model.eval()
-    # 2) 恢复 stage2 gate（冻结）
-    gate_cfg = gate_ckpt["gate_cfg"]
-    gate = GateMLP(
-        in_dim=int(gate_cfg["in_dim"]),
-        hidden_dim=int(gate_cfg["hidden_dim"]),
-        num_layers=int(gate_cfg["num_layers"]),
-        out_dim=int(gate_cfg["out_dim"]),
-        dropout=float(gate_cfg["dropout"]),
-        temperature=float(gate_cfg.get("temperature", 1.0)),
-    ).to(data.x.device)
-    gate.load_state_dict(gate_ckpt["gate_state_dict"])
-    gate.eval()
-    for p in gate.parameters():
-        p.requires_grad = False
+    use_gate = gate_ckpt is not None
+    gate = None
+    if use_gate:
+        # 2) 恢复 stage2 gate（冻结）
+        gate_cfg = gate_ckpt["gate_cfg"]
+        gate = GateMLP(
+            in_dim=int(gate_cfg["in_dim"]),
+            hidden_dim=int(gate_cfg["hidden_dim"]),
+            num_layers=int(gate_cfg["num_layers"]),
+            out_dim=int(gate_cfg["out_dim"]),
+            dropout=float(gate_cfg["dropout"]),
+            temperature=float(gate_cfg.get("temperature", 1.0)),
+        ).to(data.x.device)
+        gate.load_state_dict(gate_ckpt["gate_state_dict"])
+        gate.eval()
+        for p in gate.parameters():
+            p.requires_grad = False
 
-    task_names = gate_ckpt["task_names"]
-    task_cfg = gate_ckpt.get("task_cfg", {})
+        task_names = list(gate_ckpt["task_names"])
+        task_cfg = dict(gate_ckpt.get("task_cfg", {}))
+    else:
+        # 单 SSL 消融模式：不需要 gate checkpoint，直接按命令行任务构建分支。
+        task_names = resolve_task_names(str(args.ssl_tasks), int(args.num_ssl))
+        task_cfg = parse_task_cfg_json(str(args.task_cfg_json))
+        gate_cfg = {
+            "mode": "no_gate_single_ssl",
+            "task_count": int(len(task_names)),
+            "temperature": None,
+        }
     replace_last_k_layers = clamp_replace_last_k_layers(
         int(train_cfg.get("replace_last_k_layers", 1)),
         int(model_cfg["num_layers"]),
@@ -364,9 +399,6 @@ def run_ttt_once( # 1) 恢复 stage1 预训练模型（含 classifier）
 
     def evaluate_current(models) -> Dict[str, float]:
         with torch.no_grad():
-            pre_embed = pre_model.get_embed(data.x, data.edge_index)
-            gate_weights = gate(pre_embed)
-
             branch_logits = []
             for branch_model in models:
                 h_i = mixed_encoder_embed(
@@ -378,8 +410,15 @@ def run_ttt_once( # 1) 恢复 stage1 预训练模型（含 classifier）
                 )
                 logits_i = pre_model.classifier(h_i)
                 branch_logits.append(logits_i)
-            logits_stack = torch.stack(branch_logits, dim=1)
-            fused_logits = (logits_stack * gate_weights.unsqueeze(-1)).sum(dim=1)
+            if use_gate:
+                pre_embed = pre_model.get_embed(data.x, data.edge_index)
+                gate_weights = gate(pre_embed)
+                logits_stack = torch.stack(branch_logits, dim=1)
+                fused_logits = (logits_stack * gate_weights.unsqueeze(-1)).sum(dim=1)
+            elif len(branch_logits) == 1:
+                fused_logits = branch_logits[0]
+            else:
+                fused_logits = torch.stack(branch_logits, dim=0).mean(dim=0)
 
         return {
             "id_val_acc": accuracy(fused_logits, data.y, masks["id_val"]),
@@ -466,6 +505,8 @@ def run_ttt_once( # 1) 恢复 stage1 预训练模型（含 classifier）
         model_i.eval()
     if verbose:
         print("Adapted branches: {}".format(", ".join("{}:{}".format(i + 1, name) for i, name in enumerate(task_names))))
+        if not use_gate:
+            print("[ttt] no gate checkpoint provided; using direct SSL branch prediction")
 
     for model_i, state in zip(adapted_models, best_model_states):
         model_i.load_state_dict(state)
@@ -474,13 +515,14 @@ def run_ttt_once( # 1) 恢复 stage1 预训练模型（含 classifier）
     artifacts = {
         "model_cfg": model_cfg,
         "gate_cfg": gate_cfg,
-        "gate_state_dict": gate.state_dict(),
+        "gate_state_dict": gate.state_dict() if gate is not None else {},
         "classifier_state_dict": pre_model.classifier.state_dict(),
         "adapted_model_state_dicts": [model_i.state_dict() for model_i in adapted_models],
         "task_names": task_names,
         "task_cfg": task_cfg,
         "replace_last_k_layers": int(replace_last_k_layers),
         "history": history,
+        "fusion_mode": "gate_weighted_logits" if use_gate else ("single_ssl" if len(task_names) == 1 else "uniform_logit_average"),
     }
     return metrics, artifacts
 
@@ -502,6 +544,46 @@ def save_ttt_curve_plot(history, plot_path: Path) -> None:
     plt.close()
 
 
+def save_gate_weight_plot(task_names: Sequence[str], gate_weights: torch.Tensor, plot_path: Path) -> None:
+    if not task_names or gate_weights.ndim != 2 or int(gate_weights.shape[0]) == 0:
+        return
+
+    weights_np = gate_weights.detach().cpu().numpy()
+    task_count = min(len(task_names), int(weights_np.shape[1]))
+    if task_count <= 0:
+        return
+
+    if task_count == 1:
+        y = weights_np[:, 0]
+        x = np.arange(y.shape[0])
+        plt.figure(figsize=(8, 4))
+        plt.scatter(x, y, s=6, alpha=0.8)
+        plt.ylim(0.0, 1.0)
+        plt.xlim(0, max(1, y.shape[0]))
+        plt.xlabel("Node Index")
+        plt.ylabel("Gate weight: {}".format(task_names[0]))
+        plt.title("Gate weights (one task)")
+        plt.tight_layout()
+        plt.savefig(plot_path, dpi=180)
+        plt.close()
+        return
+
+    if task_count >= 2:
+        w1 = weights_np[:, 0]
+        w2 = weights_np[:, 1]
+        plt.figure(figsize=(5, 5))
+        plt.scatter(w1, w2, s=6, alpha=0.7)
+        plt.xlim(0.0, 1.0)
+        plt.ylim(0.0, 1.0)
+        plt.xlabel("Gate weight: {}".format(task_names[0]))
+        plt.ylabel("Gate weight: {}".format(task_names[1]))
+        plt.title("Gate weights (two tasks)")
+        plt.tight_layout()
+        plt.savefig(plot_path, dpi=180)
+        plt.close()
+        return
+
+
 def build_ttt_search_space(trial, args, num_layers: int):
     max_layers = max(int(num_layers), 1)
     return {
@@ -515,22 +597,22 @@ def build_ttt_search_space(trial, args, num_layers: int):
 
 def main():
     args = parse_args()
-    if not args.pretrain_ckpt or not args.gate_ckpt:
-        raise ValueError("--pretrain-ckpt and --gate-ckpt are required (or provide them via --params-file)")
+    if not args.pretrain_ckpt:
+        raise ValueError("--pretrain-ckpt is required (or provide it via --params-file)")
 
     set_seed(int(args.seed))
     device = torch.device(args.device)
 
     pre_ckpt_path = Path(args.pretrain_ckpt)
     pre_ckpt = safe_torch_load(pre_ckpt_path)
-    gate_ckpt = safe_torch_load(Path(args.gate_ckpt))
+    gate_ckpt = safe_torch_load(Path(args.gate_ckpt)) if args.gate_ckpt else None
 
     pre_ckpt["model_cfg"] = normalize_pretrain_model_cfg(pre_ckpt, pre_ckpt_path)
 
     model_cfg = pre_ckpt["model_cfg"]
-    dataset = args.dataset or gate_ckpt.get("dataset", pre_ckpt["dataset"])
-    domain = args.domain or gate_ckpt.get("domain", pre_ckpt["domain"])
-    shift = args.shift or gate_ckpt.get("shift", pre_ckpt["shift"])
+    dataset = args.dataset or (gate_ckpt.get("dataset") if gate_ckpt is not None else "") or pre_ckpt["dataset"]
+    domain = args.domain or (gate_ckpt.get("domain") if gate_ckpt is not None else "") or pre_ckpt["domain"]
+    shift = args.shift or (gate_ckpt.get("shift") if gate_ckpt is not None else "") or pre_ckpt["shift"]
 
     data, masks, data_path = load_good_data(dataset, domain, shift, device)
 
@@ -596,7 +678,7 @@ def main():
 
     out_dir = make_stage_output_dir(
         args.output_root,
-        "stage3",
+        "stage3" if gate_ckpt is not None else "stage3_single_ssl",
         dataset,
         domain,
         shift,
@@ -626,6 +708,7 @@ def main():
             "gate_state_dict": artifacts["gate_state_dict"],
             "classifier_state_dict": artifacts["classifier_state_dict"],
             "adapted_model_state_dicts": artifacts["adapted_model_state_dicts"],
+            "fusion_mode": artifacts.get("fusion_mode", ""),
             "train_cfg": best_train_cfg,
             "metrics": metrics,
             "history": artifacts.get("history", []),
@@ -643,6 +726,9 @@ def main():
         "shift": shift,
         "pretrain_ckpt": str(args.pretrain_ckpt),
         "gate_ckpt": str(args.gate_ckpt),
+        "ssl_tasks": ",".join(artifacts["task_names"]),
+        "num_ssl": int(len(artifacts["task_names"])),
+        "task_cfg_json": json.dumps(artifacts["task_cfg"], ensure_ascii=True),
         "ssl_lr": float(best_train_cfg["ssl_lr"]),
         "encoder_lr": float(best_train_cfg["encoder_lr"]),
         "weight_decay": float(best_train_cfg["weight_decay"]),
@@ -656,6 +742,7 @@ def main():
         "output_root": str(args.output_root),
         "timestamp": str(args.timestamp),
         "run_name": str(args.run_name),
+        "fusion_mode": artifacts.get("fusion_mode", ""),
         "output_dir": str(out_dir),
         "plot_path": str(plot_path),
     }

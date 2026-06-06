@@ -1,32 +1,41 @@
 from __future__ import annotations
 
 import copy
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch_geometric.utils import dense_to_sparse, to_dense_adj
 
-
-def _accuracy(logits: torch.Tensor, y: torch.Tensor, mask: Optional[torch.Tensor]) -> float:
-    if mask is None or int(mask.sum()) == 0:
-        return float("nan")
-    pred = logits[mask].argmax(dim=-1)
-    return float((pred == y[mask]).float().mean().item())
+from baseline.common import base_adaptation_search_space, base_adaptation_train_cfg, evaluate_model
 
 
-@torch.no_grad()
-def _evaluate(model, data, masks) -> Dict[str, float]:
-    model.eval()
-    logits = model(data.x, data.edge_index)
-    return {
-        "id_val_acc": _accuracy(logits, data.y, masks["id_val"]),
-        "id_test_acc": _accuracy(logits, data.y, masks["id_test"]),
-        "ood_val_acc": _accuracy(logits, data.y, masks["ood_val"]),
-        "ood_test_acc": _accuracy(logits, data.y, masks["ood_test"]),
-    }
+def build_eerm_right_train_cfg(args, num_layers: int) -> Dict[str, object]:
+    cfg = base_adaptation_train_cfg(args, num_layers)
+    cfg.update(
+        {
+            "eerm_right_k": int(args.eerm_right_k),
+            "eerm_right_t": int(args.eerm_right_t),
+            "eerm_right_num_sample": int(args.eerm_right_num_sample),
+            "eerm_right_beta": float(args.eerm_right_beta),
+        }
+    )
+    return cfg
+
+
+def build_eerm_right_search_space(trial, args, num_layers: int) -> Dict[str, object]:
+    cfg = base_adaptation_search_space(trial, args, num_layers)
+    cfg.update(
+        {
+            "ssl_lr": trial.suggest_float("ssl_lr", 1e-5, 1e-2, log=True),
+            "eerm_right_k": int(trial.suggest_int("eerm_right_k", 2, 5)),
+            "eerm_right_t": int(trial.suggest_int("eerm_right_t", 1, 3)),
+            "eerm_right_num_sample": int(trial.suggest_int("eerm_right_num_sample", 1, 3)),
+            "eerm_right_beta": trial.suggest_float("eerm_right_beta", 0.1, 2.0, log=True),
+        }
+    )
+    return cfg
 
 
 class DenseGraphEditor(nn.Module):
@@ -84,7 +93,7 @@ def _forward_eerm_right(model, editor: DenseGraphEditor, data, masks, train_cfg:
     return var, mean, log_p
 
 
-def run_eerm_right_once(args, model, data, masks, train_cfg: Dict[str, float], model_cfg: Dict[str, object], verbose: bool = True):
+def run_eerm_right_once(args, model, data, masks, train_cfg: Dict[str, object], model_cfg: Dict[str, object], verbose: bool = True):
     num_nodes = int(data.x.shape[0])
     device = data.x.device
     num_views = int(train_cfg["eerm_right_k"])
@@ -105,7 +114,7 @@ def run_eerm_right_once(args, model, data, masks, train_cfg: Dict[str, float], m
     best_score = float("-inf")
     best_state = copy.deepcopy(model.state_dict())
     best_editor_state = copy.deepcopy(editor.state_dict())
-    best_metrics = _evaluate(model, data, masks)
+    best_metrics = evaluate_model(model, data, masks)
     history: List[Dict[str, float]] = [{"epoch": 0, "var": float("nan"), "mean": float("nan"), **best_metrics}]
 
     num_inner = max(int(train_cfg["eerm_right_t"]), 1)
@@ -137,7 +146,7 @@ def run_eerm_right_once(args, model, data, masks, train_cfg: Dict[str, float], m
             last_var = var.detach()
             last_mean = mean.detach()
 
-        metrics = _evaluate(model, data, masks)
+        metrics = evaluate_model(model, data, masks)
         history.append(
             {
                 "epoch": int(epoch),

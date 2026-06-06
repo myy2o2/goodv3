@@ -29,7 +29,7 @@ def resolve_dataset_path(dataset: str, domain: str, shift: str) -> Path:
         "citeseer": ["GOODCiteseer"],
         "cora": ["GOODCora"],
         "pubmed": ["GOODPubmed"],
-        "wikics": ["GOODWikiCS", "GOODwikics"],
+        "wikics": ["GOODWikiCS", "GOODwikics", "GOODWikics"],
         "ogbn-arxiv": ["GOODArxiv"],
         "arxiv": ["GOODArxiv"],
     }.get(dataset_key)
@@ -265,7 +265,7 @@ def load_flat_params(params_file: str) -> Dict[str, object]:
 def parse_args():
     parser = argparse.ArgumentParser(description="Stage-1 pretrain for GOOD node classification")
     parser.add_argument("--dataset", type=str, default="cora")
-    parser.add_argument("--domain", type=str, default="word", choices=["word", "degree"])
+    parser.add_argument("--domain", type=str, default="word", choices=["word", "degree", "time"])
     parser.add_argument("--shift", type=str, default="covariate", choices=["covariate", "concept", "no_shift"])
 
     parser.add_argument("--gnn-type", type=str, default="gcn", choices=["gcn", "gat", "sage"])
