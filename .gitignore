@@ -1,10 +1,7 @@
 old/
-outputs/
-datasets/
 oldciteseer/
 outputs_baseline/
 *.pyc
-output*/
 logs/
 oldttt/
 jiaoben/

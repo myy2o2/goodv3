@@ -1,0 +1,18 @@
+{
+  "dataset": "pubmed",
+  "domain": "word",
+  "shift": "covariate",
+  "data_path": "datasets/GOODPubmed/word/processed/covariate.pt",
+  "pretrain_ckpt": "outputs/stage1/pubmed/word/covariate/right/pretrain_model.pt",
+  "ttt_ckpt": "outputs/stage3_new/pubmed/word/covariate/8730_pub_cov_word_homottt_pseudolabel_propagation/ttt_shared_onestage_model.pt",
+  "selected_run": "outputs/stage3_new/pubmed/word/covariate/8730_pub_cov_word_homottt_pseudolabel_propagation",
+  "run_regex": "",
+  "select": "best",
+  "sample_mask": "test",
+  "max_nodes": 3000,
+  "num_nodes_used": 3000,
+  "perplexity": 30.0,
+  "max_iter": 1000,
+  "separate_tsne": false,
+  "standardized": true
+}

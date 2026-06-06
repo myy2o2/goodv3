@@ -5,7 +5,7 @@
 1. `pretrain.py`：训练 Stage 1 的监督 GNN 节点分类器。
 2. `tttnew.py`：从 Stage 1 checkpoint 出发，执行带 gate 的 test-time training。
 
-旧的 stage2 gate 训练和 stage3 batch 组合搜索不再是主流程。`templates/stage2_*.json` 现在作为 `tttnew.py` 的参数文件使用。
+`templates/stage3_*.json` 现在作为 `tttnew.py` 的参数文件使用。
 
 ## 数据目录
 
@@ -61,7 +61,6 @@ python pretrain.py --params-file templates/stage1_arxiv_con_deg.json --timestamp
 python pretrain.py --params-file templates/stage1_arxiv_cov_time.json --timestamp right
 ```
 
-如果不想固定为 `right`，可以省略 `--timestamp right`。这种情况下 Stage 1 会写入当前时间戳目录，后续需要把 `templates/stage2_*.json` 里的 `pretrain_ckpt` 改成实际 checkpoint 路径，或者在命令行里覆盖：
 
 ```bash
 python tttnew.py \
@@ -94,7 +93,6 @@ gate_node_weights.pt
 metrics.json
 params.json
 ood_test_acc_vs_epoch.png
-plot.png
 ```
 
 运行全部配置：
@@ -145,51 +143,4 @@ templates/stage2_<dataset>_<shift-abbrev>_<domain-abbrev>.json
 | `cov` | `covariate` |
 | `deg` | `degree` |
 
-## Baseline
 
-baseline 参数模板已经按两阶段流程重命名为：
-
-```text
-baseline/stage2_baseline.template.json
-```
-
-旧名 `baseline/stage3_baseline.template.json` 不再使用。baseline 也是从 Stage 1 的 `pretrain_model.pt` 出发，因此现在归到第二阶段配置。
-
-运行 baseline 前需要确认模板里的字段和 Stage 1 输出一致：
-
-```json
-{
-  "pretrain_ckpt": "./outputs/stage1/citeseer/word/covariate/right/pretrain_model.pt",
-  "dataset": "citeseer",
-  "domain": "word",
-  "shift": "covariate"
-}
-```
-
-如果保留 baseline runner，可以用参数文件运行：
-
-```bash
-python baseline/run_baseline_ttt.py --params-file baseline/stage2_baseline.template.json
-```
-
-baseline 输出默认写到：
-
-```text
-outputs_baseline/baseline_compare/<dataset>/<domain>/<shift>/<timestamp>/
-```
-
-## 提交前检查
-
-建议提交前至少跑：
-
-```bash
-python -m py_compile pretrain.py ttt.py tttnew.py
-python pretrain.py --help
-python tttnew.py --help
-```
-
-如果本次提交包含 baseline 代码，也检查 baseline 模块：
-
-```bash
-python -m py_compile baseline/*.py
-```

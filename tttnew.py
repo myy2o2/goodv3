@@ -187,7 +187,7 @@ def parse_args():
     parser.add_argument("--shift", type=str, default="")
 
     # Stage2-style task and gate configuration.
-    parser.add_argument("--ssl-tasks", type=str, default="consistency")
+    parser.add_argument("--ssl-tasks", type=str, default="homottt,homonode,pseudolabel")
     parser.add_argument("--num-ssl", type=int, default=1)
     parser.add_argument("--task-cfg-json", type=str, default="")
     parser.add_argument("--gate-hidden-dim", type=int, default=128)
